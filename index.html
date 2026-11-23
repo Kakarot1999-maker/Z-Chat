@@ -1017,6 +1017,7 @@
         getDatabase, ref, set, get, push, update, remove,
         onChildAdded, onChildChanged, onChildRemoved, onDisconnect, onValue, increment, runTransaction
     } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyCbg2F7DpMCJpLhLt_bKtKYWCvV4Wf6r_s",
@@ -1031,6 +1032,20 @@
 
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
+
+    // ================= تسجيل دخول صامت (Anonymous Auth) لتأمين القاعدة لاحقًا =================
+    const auth = getAuth(app);
+    let myAuthUid = null;
+    let resolveAuthReady;
+    const authReady = new Promise((res) => { resolveAuthReady = res; });
+    let authReadySettled = false;
+    const settleAuthReady = () => { if (!authReadySettled) { authReadySettled = true; resolveAuthReady(); } };
+    onAuthStateChanged(auth, (user) => {
+        myAuthUid = user ? user.uid : null;
+        settleAuthReady();
+    });
+    signInAnonymously(auth).catch((e) => { console.error('anon auth failed', e); settleAuthReady(); });
+    setTimeout(settleAuthReady, 8000); // أمان: ما نستناش للأبد لو النت مقطوع
 
     // ================= ثوابت =================
     const OWNER_ID = "Kakarot_San1999";
@@ -1342,6 +1357,7 @@
         let created = false;
         try {
             ensureCrypto();
+            await authReady;
             let id;
             do {
                 id = 'user_' + Math.random().toString(36).substring(2, 10);
@@ -1349,7 +1365,8 @@
 
             const passHash = await hashPassword(password, id);
             await set(ref(db, `users_directory/${id}`), {
-                nickname: nick, avatar: '', userId: id, passHash, online: true
+                nickname: nick, avatar: '', userId: id, passHash, online: true,
+                authUids: myAuthUid ? { [myAuthUid]: true } : {}
             });
 
             myId = id; savedNickname = nick; myAvatar = '';
@@ -1380,6 +1397,7 @@
         let ok = false;
         try {
             ensureCrypto();
+            await authReady;
             inputId = await resolveId(inputId);
             const userSnap = await get(ref(db, `users_directory/${inputId}`));
             if (!userSnap.exists()) {
@@ -1405,6 +1423,7 @@
                     myAvatar = u.avatar || '';
                     localStorage.setItem('nexus_id', myId);
                     localStorage.setItem('nexus_nickname', savedNickname);
+                    if (myAuthUid) update(ref(db, `users_directory/${myId}/authUids`), { [myAuthUid]: true }).catch(() => {});
                     ok = true;
                     await showStatus(true, 'البيانات صحيحة', `أهلاً ${savedNickname}!`);
                 }
@@ -1442,6 +1461,7 @@
 
         // تحقق في الخلفية إن الحساب لسه موجود وحدّث بياناته (من غير ما نوقف عرض الشاتات)
         try {
+            await authReady;
             const uSnap = await get(ref(db, `users_directory/${myId}`));
             if (!uSnap.exists()) {            // الحساب اتحذف أو بيانات الجلسة غلط
                 clearSession();
@@ -1455,6 +1475,7 @@
             $('userBadge').textContent = savedNickname;
             setAvatarContent($('myHeaderAvatar'), myAvatar, firstChar(savedNickname));
             myUser = u;
+            if (myAuthUid) update(ref(db, `users_directory/${myId}/authUids`), { [myAuthUid]: true }).catch(() => {});
             await loadNicknames();
             renderMyProfile();
         } catch (e) {
