@@ -1420,24 +1420,13 @@
     };
 
     async function showDashboard() {
-        const uSnap = await get(ref(db, `users_directory/${myId}`));
-        if (!uSnap.exists()) {            // الحساب اتحذف أو بيانات الجلسة غلط
-            clearSession();
-            location.reload();
-            return;
-        }
-        const u = uSnap.val();
-        savedNickname = u.nickname;
-        myAvatar = u.avatar || '';
-        localStorage.setItem('nexus_nickname', savedNickname);
-
+        // نعرض الداشبورد فورًا بالبيانات المحفوظة محليًا (زي تيلجرام)، من غير ما ننتظر رد السيرفر
         $('authScreen').style.display = 'none';
         $('mainDashboard').style.display = 'flex';
         $('userBadge').textContent = savedNickname;
         $('myUserIdBadge').textContent = `‎@${myHandle || myId} (📋 نسخ)`;
         setAvatarContent($('myHeaderAvatar'), myAvatar, firstChar(savedNickname));
-        myUser = u;
-        await loadNicknames();
+        loadChatCache();
         renderMyProfile();
         loadFavSetOnce();
 
@@ -1448,6 +1437,29 @@
         startNotifications();
         loadAcceptedChats();
         loadGroupsList();
+        updateOfflineBar();
+        flushOutbox();
+
+        // تحقق في الخلفية إن الحساب لسه موجود وحدّث بياناته (من غير ما نوقف عرض الشاتات)
+        try {
+            const uSnap = await get(ref(db, `users_directory/${myId}`));
+            if (!uSnap.exists()) {            // الحساب اتحذف أو بيانات الجلسة غلط
+                clearSession();
+                location.reload();
+                return;
+            }
+            const u = uSnap.val();
+            savedNickname = u.nickname;
+            myAvatar = u.avatar || '';
+            localStorage.setItem('nexus_nickname', savedNickname);
+            $('userBadge').textContent = savedNickname;
+            setAvatarContent($('myHeaderAvatar'), myAvatar, firstChar(savedNickname));
+            myUser = u;
+            await loadNicknames();
+            renderMyProfile();
+        } catch (e) {
+            console.error(e);
+        }
     }
 
     // ================= السحب للتحديث =================
@@ -1996,6 +2008,86 @@
         $('groupsListContainer').replaceChildren();
         $('acceptedChatsList').replaceChildren(...(items.length || !q ? items : [h('div', { class: 'no-results' }, 'مفيش شاتات بالاسم ده')]));
         document.title = (total ? `(${total}) ` : '') + 'Z-Chat - التطبيق المتطور';
+        saveChatCache();
+    }
+
+    // ================= كاش الشاتات (أوفلاين) =================
+    const chatCacheKey = () => `nexus_chatcache_${myId}`;
+    let chatCacheSaveTimer = null;
+    function saveChatCache() {
+        clearTimeout(chatCacheSaveTimer);
+        chatCacheSaveTimer = setTimeout(() => {
+            try { localStorage.setItem(chatCacheKey(), JSON.stringify({ priv: privCache, grp: grpCache, inbox })); } catch (e) {}
+        }, 400);
+    }
+    function loadChatCache() {
+        try {
+            const raw = localStorage.getItem(chatCacheKey());
+            if (!raw) return;
+            const c = JSON.parse(raw);
+            if (Array.isArray(c.priv)) privCache = c.priv;
+            if (Array.isArray(c.grp)) grpCache = c.grp;
+            if (c.inbox && typeof c.inbox === 'object') inbox = c.inbox;
+            renderChatList();
+        } catch (e) {}
+    }
+
+    // ================= شريط عدم الاتصال =================
+    function updateOfflineBar() {
+        const bar = $('offlineBar');
+        if (bar) bar.style.display = navigator.onLine ? 'none' : 'block';
+    }
+    window.addEventListener('online', () => { updateOfflineBar(); flushOutbox(); });
+    window.addEventListener('offline', () => updateOfflineBar());
+
+    // ================= طابور إرسال الرسائل النصية بدون نت =================
+    const outboxKey = () => `nexus_outbox_${myId}`;
+    function readOutbox() {
+        try { const v = JSON.parse(localStorage.getItem(outboxKey())); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+    }
+    function writeOutbox(list) {
+        try { localStorage.setItem(outboxKey(), JSON.stringify(list)); } catch (e) {}
+    }
+    function queueOutboxMsg(item) {
+        const list = readOutbox();
+        list.push(item);
+        writeOutbox(list);
+    }
+    function renderQueuedOutboxFor(chatPath, roomId, type) {
+        const box = $('roomMessagesBox');
+        if (!box) return;
+        for (const item of readOutbox()) {
+            if (item.activeChatPath !== chatPath) continue;
+            const bubble = renderMessage(item.tempId, item.data, roomId, type);
+            bubble.style.opacity = '.65';
+            bubble.appendChild(h('span', { style: 'display:block; font-size:11px; margin-top:3px; opacity:.8;' }, '⏳ هتترسل لما النت يرجع'));
+            box.appendChild(bubble);
+        }
+        box.scrollTop = box.scrollHeight;
+    }
+    let flushingOutbox = false;
+    async function flushOutbox() {
+        if (flushingOutbox || !myId || !navigator.onLine) return;
+        flushingOutbox = true;
+        try {
+            let list = readOutbox();
+            while (list.length) {
+                const item = list[0];
+                try {
+                    await push(ref(db, item.activeChatPath), item.data);
+                    await afterSendBookkeeping(item.data.text, item.roomId, item.roomType, item.partnerId);
+                    const el = document.getElementById(`msg_${item.tempId}`);
+                    if (el) el.remove();
+                } catch (e) {
+                    console.error('تعذر إرسال رسالة من الطابور', e);
+                    break; // سيبها في الطابور ونجرب تاني لما النت يرجع
+                }
+                list.shift();
+                writeOutbox(list);
+            }
+        } finally {
+            flushingOutbox = false;
+        }
     }
 
     async function loadGroupsList() {
@@ -2299,6 +2391,7 @@
             const el = document.getElementById(`msg_${snap.key}`);
             if (el) el.remove();
         });
+        renderQueuedOutboxFor(activeChatPath, roomId, type);
     };
 
     // ---------- عرض الرسائل ----------
@@ -2380,8 +2473,10 @@
             bubble.append(data.text ?? '');
         }
 
-        attachLongPress(bubble, () => openMsgOptions(roomId, msgId, type, data.senderId));
-        attachSwipeReply(bubble, msgId);
+        if (!String(msgId).startsWith('local_')) {
+            attachLongPress(bubble, () => openMsgOptions(roomId, msgId, type, data.senderId));
+            attachSwipeReply(bubble, msgId);
+        }
         return bubble;
     }
 
@@ -2609,11 +2704,12 @@
         el.addEventListener('touchcancel', () => { tracking = false; reset(); });
     }
 
-    async function afterSendBookkeeping(preview) {
-        const rid = currentRoomId;
+    async function afterSendBookkeeping(preview, overrideRoomId, overrideRoomType, overridePartnerId) {
+        const rid = overrideRoomId || currentRoomId;
+        const roomType = overrideRoomType || currentRoomType;
         let recipients = [];
-        if (currentRoomType === 'private') {
-            const partnerId = activePartnerUserId || partnerFromChatId(rid);
+        if (roomType === 'private') {
+            const partnerId = overridePartnerId !== undefined ? overridePartnerId : (activePartnerUserId || partnerFromChatId(rid));
             if (partnerId && partnerId !== myId) { await touchAcceptedChats(rid, partnerId); recipients = [partnerId]; }
         } else {
             const s = await get(ref(db, `group_members/${rid}`));
@@ -2652,11 +2748,27 @@
             if (!(await canSendNow())) { input.value = text; return; }
             const msg = { text, sender: savedNickname, senderId: myId, type: 'text', timestamp: Date.now() };
             if (replyTo) msg.reply = replyTo;
-            await push(ref(db, activeChatPath), msg);
+            const rid = currentRoomId, rtype = currentRoomType;
+            const partnerId = rtype === 'private' ? (activePartnerUserId || partnerFromChatId(rid)) : undefined;
+
+            if (!navigator.onLine) {
+                const tempId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+                queueOutboxMsg({ tempId, activeChatPath, roomId: rid, roomType: rtype, partnerId, data: msg });
+                if (roomIsOpen(rid)) {
+                    const box = $('roomMessagesBox');
+                    const bubble = renderMessage(tempId, msg, rid, rtype);
+                    bubble.style.opacity = '.65';
+                    bubble.appendChild(h('span', { style: 'display:block; font-size:11px; margin-top:3px; opacity:.8;' }, '⏳ هتترسل لما النت يرجع'));
+                    box.appendChild(bubble);
+                    box.scrollTop = box.scrollHeight;
+                }
+            } else {
+                await push(ref(db, activeChatPath), msg);
+                await afterSendBookkeeping(text, rid, rtype, partnerId);
+            }
             clearReply();
             toggleEmoji(false);
             $('attachPanel')?.classList.remove('open');
-            await afterSendBookkeeping(text);
         } catch (e) {
             console.error(e);
             input.value = text;
