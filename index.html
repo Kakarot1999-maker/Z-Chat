@@ -1447,17 +1447,20 @@
         setAvatarContent($('myHeaderAvatar'), myAvatar, firstChar(savedNickname));
         loadChatCache();
         renderMyProfile();
-        loadFavSetOnce();
-
-        setupPresence();
-        loadChatBg();
-        initNotifBanner();
-        loadMyHandle();
-        startNotifications();
-        loadAcceptedChats();
-        loadGroupsList();
         updateOfflineBar();
-        flushOutbox();
+
+        // نستنى تسجيل الدخول الصامت يخلص الأول قبل أي طلب من/لقاعدة البيانات (عشان قواعد الحماية الجديدة)
+        authReady.then(() => {
+            loadFavSetOnce();
+            setupPresence();
+            loadChatBg();
+            initNotifBanner();
+            loadMyHandle();
+            startNotifications();
+            loadAcceptedChats();
+            loadGroupsList();
+            flushOutbox();
+        });
 
         // تحقق في الخلفية إن الحساب لسه موجود وحدّث بياناته (من غير ما نوقف عرض الشاتات)
         try {
@@ -2333,6 +2336,7 @@
     $('btnSendRoomMsg').addEventListener('mousedown', (e) => e.preventDefault());
 
     window.openRoom = async function (roomId, roomName, type, partnerId = null) {
+        await authReady;
         stopRoomListeners();
         clearMediaCache();
         roomMsgs.clear();
